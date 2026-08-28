@@ -182,9 +182,8 @@ sealed class MainForm : Form
         psi.ArgumentList.Add("--import");
         psi.ArgumentList.Add("tsx/esm");
         psi.ArgumentList.Add(bin);
+        // `web` is the profile alias; --profile is a parent flag and is rejected after it.
         psi.ArgumentList.Add("web");
-        psi.ArgumentList.Add("--profile");
-        psi.ArgumentList.Add(_config.Profile);
         psi.ArgumentList.Add("--no-open");
         psi.ArgumentList.Add("--port");
         psi.ArgumentList.Add(_config.Port.ToString());
