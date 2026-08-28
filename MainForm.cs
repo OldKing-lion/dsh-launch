@@ -15,16 +15,27 @@ namespace DshRepoShell;
 sealed class MainForm : Form
 {
     static readonly Regex ReadyUrl = new(
-        @"dsh web:\s+(http://127\.0\.0\.1:\d+/\S*)",
-        RegexOptions.Compiled);
+        @"https?://127\.0\.0\.1:\d+/\S*token=\S+",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    static readonly Regex Ansi = new(@"\x1B\[[0-9;]*[A-Za-z]", RegexOptions.Compiled);
 
-    static readonly string UserDataDir = Path.Combine(
+    static readonly string DataDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "dsh-repo-shell",
-        "webview");
+        "dsh-repo-shell");
+    static readonly string UserDataDir = Path.Combine(DataDir, "webview");
+    static readonly string LogPath = Path.Combine(DataDir, "dsh-web.log");
 
     readonly AppConfig _config = AppConfig.Load();
     readonly WebView2 _web = new() { Dock = DockStyle.Fill };
+    readonly Label _status = new()
+    {
+        Dock = DockStyle.Fill,
+        TextAlign = ContentAlignment.MiddleCenter,
+        Font = new Font("Segoe UI", 12f),
+        BackColor = Color.White,
+        ForeColor = Color.FromArgb(40, 40, 40),
+        Text = "正在启动 dsh web…",
+    };
     readonly NotifyIcon _tray;
     readonly Icon _icon;
     bool _reallyExit;
@@ -41,7 +52,9 @@ sealed class MainForm : Form
         StartPosition = FormStartPosition.CenterScreen;
         MinimumSize = new Size(800, 560);
 
+        Controls.Add(_status);
         Controls.Add(_web);
+        _status.BringToFront();
 
         var menu = new ContextMenuStrip();
         menu.Items.Add("显示窗口", null, (_, _) => ShowFromTray());
@@ -59,24 +72,49 @@ sealed class MainForm : Form
         Shown += async (_, _) => await BootAsync();
     }
 
+    void SetStatus(string text)
+    {
+        if (IsDisposed) return;
+        if (InvokeRequired)
+        {
+            BeginInvoke(() => SetStatus(text));
+            return;
+        }
+        _status.Text = text;
+        _status.Visible = true;
+        _status.BringToFront();
+    }
+
     async Task BootAsync()
     {
         try
         {
             Directory.CreateDirectory(UserDataDir);
+            SetStatus("正在初始化窗口…");
             var env = await CoreWebView2Environment.CreateAsync(null, UserDataDir);
             await _web.EnsureCoreWebView2Async(env);
             _web.CoreWebView2.Settings.AreDefaultContextMenusEnabled = true;
             _web.CoreWebView2.Settings.AreDevToolsEnabled = true;
+            _web.CoreWebView2.NavigationCompleted += (_, e) =>
+            {
+                if (e.IsSuccess)
+                {
+                    _status.Visible = false;
+                    return;
+                }
+                SetStatus($"页面加载失败（0x{e.WebErrorStatus:X}）。日志：{LogPath}");
+            };
 
             var url = await EnsureDshUrlAsync();
+            SetStatus("正在打开页面…");
             _web.CoreWebView2.Navigate(url);
         }
         catch (Exception ex)
         {
+            SetStatus(ex.Message);
             MessageBox.Show(
                 this,
-                ex.Message,
+                ex.Message + "\n\n日志：" + LogPath,
                 "DeepSeek Harness 启动失败",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error);
@@ -117,10 +155,18 @@ sealed class MainForm : Form
             ? Environment.GetEnvironmentVariable("DSH_NODE") ?? @"C:\Program Files\nodejs\node.exe"
             : _config.NodeExe;
         var bin = Path.Combine(_config.RepoRoot, "apps", "cli", "src", "bin.ts");
+        if (!File.Exists(node))
+        {
+            throw new InvalidOperationException($"找不到 Node：{node}");
+        }
         if (!File.Exists(bin))
         {
             throw new InvalidOperationException($"找不到仓库启动入口：{bin}");
         }
+
+        Directory.CreateDirectory(DataDir);
+        var log = new StringBuilder();
+        SetStatus("正在启动仓库里的 dsh web…");
 
         var psi = new ProcessStartInfo
         {
@@ -142,20 +188,40 @@ sealed class MainForm : Form
         psi.ArgumentList.Add("--no-open");
         psi.ArgumentList.Add("--port");
         psi.ArgumentList.Add(_config.Port.ToString());
+        var path = psi.Environment["PATH"] ?? "";
+        var nodeDir = Path.GetDirectoryName(node);
+        if (!string.IsNullOrEmpty(nodeDir) && !path.Contains(nodeDir, StringComparison.OrdinalIgnoreCase))
+        {
+            psi.Environment["PATH"] = nodeDir + ";" + path;
+        }
 
         var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
         var ready = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
         void onLine(string? line)
         {
             if (string.IsNullOrEmpty(line)) return;
-            var match = ReadyUrl.Match(line);
+            var clean = Ansi.Replace(line, "").Trim();
+            lock (log)
+            {
+                log.AppendLine(clean);
+            }
+            var match = ReadyUrl.Match(clean);
             if (match.Success)
             {
-                ready.TrySetResult(match.Groups[1].Value.Trim());
+                ready.TrySetResult(match.Value.Trim().TrimEnd(')', ',', ';'));
             }
         }
         process.OutputDataReceived += (_, e) => onLine(e.Data);
         process.ErrorDataReceived += (_, e) => onLine(e.Data);
+        process.Exited += (_, _) =>
+        {
+            if (ready.Task.IsCompleted) return;
+            string dump;
+            lock (log) dump = Tail(log.ToString(), 40);
+            File.WriteAllText(LogPath, dump);
+            ready.TrySetException(new InvalidOperationException(
+                $"dsh web 进程提前退出（code {process.ExitCode}）。\n{dump}"));
+        };
         if (!process.Start())
         {
             throw new InvalidOperationException("无法启动 pnpm dsh web（node 进程没起来）");
@@ -169,13 +235,23 @@ sealed class MainForm : Form
         {
             var url = await ready.Task.WaitAsync(cts.Token);
             new LaunchState { Pid = process.Id, AuthenticatedUrl = url }.Save();
+            lock (log) File.WriteAllText(LogPath, log.ToString());
             return url;
         }
         catch (OperationCanceledException)
         {
+            string dump;
+            lock (log) dump = Tail(log.ToString(), 40);
+            File.WriteAllText(LogPath, dump);
             throw new TimeoutException(
-                "90 秒内没有等到 dsh web 就绪。请先在仓库目录手动运行 pnpm dsh web --no-open 看报错。");
+                "90 秒内没有等到 dsh web 的 token URL。\n" + dump);
         }
+    }
+
+    static string Tail(string text, int lines)
+    {
+        var all = text.Replace("\r\n", "\n").Split('\n');
+        return string.Join("\n", all.Skip(Math.Max(0, all.Length - lines)));
     }
 
     static async Task<bool> PortOpenAsync(int port)
@@ -222,6 +298,7 @@ sealed class MainForm : Form
             _tray.Dispose();
             _icon.Dispose();
             _web.Dispose();
+            _status.Dispose();
         }
         base.Dispose(disposing);
     }
