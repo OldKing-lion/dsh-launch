@@ -35,4 +35,6 @@ dotnet publish DshRepoShell.csproj -c Release -r win-x64 --self-contained false 
 
 双击 `publish\DshRepoShell.exe`。右键 exe → 发送到 → 桌面快捷方式。
 
-若 3080 已被终端里的 `pnpm dsh web` 占用，本窗口没有那次启动的 token，可能显示未授权。先关掉终端里的再开本壳。
+dsh web 要求带 process token 的地址。本程序会自己拉起 `pnpm dsh web --no-open` 并打开打印出来的 `?token=` URL。
+
+若 3080 已被终端里的 `pnpm dsh web` 占用，会提示你先关掉那个进程再重试——直接打开 `/` 会出 `authentication required`。

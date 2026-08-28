@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net.Sockets;
 using System.Text;
+using System.Text.RegularExpressions;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 
@@ -13,6 +14,10 @@ namespace DshRepoShell;
 /// </summary>
 sealed class MainForm : Form
 {
+    static readonly Regex ReadyUrl = new(
+        @"dsh web:\s+(http://127\.0\.0\.1:\d+/\S*)",
+        RegexOptions.Compiled);
+
     static readonly string UserDataDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "dsh-repo-shell",
@@ -80,11 +85,34 @@ sealed class MainForm : Form
 
     async Task<string> EnsureDshUrlAsync()
     {
-        if (await PortOpenAsync(_config.Port))
+        while (await PortOpenAsync(_config.Port))
         {
-            return $"http://127.0.0.1:{_config.Port}/";
+            var saved = LaunchState.Load();
+            if (saved?.MatchesLiveProcess() == true
+                && saved.AuthenticatedUrl.Contains("token=", StringComparison.Ordinal))
+            {
+                return saved.AuthenticatedUrl;
+            }
+
+            var choice = MessageBox.Show(
+                this,
+                $"端口 {_config.Port} 已被占用，但本窗口没有那次 dsh web 的登录 token。\n\n"
+                + "请先关掉终端里已经在跑的 pnpm dsh web，然后点「重试」。\n"
+                + "本程序需要自己拉起 dsh，才能打开带 token 的地址。",
+                "需要重新拉起 dsh web",
+                MessageBoxButtons.RetryCancel,
+                MessageBoxIcon.Warning);
+            if (choice != DialogResult.Retry)
+            {
+                throw new InvalidOperationException("已取消。关掉原来的 dsh web 后再打开本程序。");
+            }
         }
 
+        return await StartDshAndWaitForTokenAsync();
+    }
+
+    async Task<string> StartDshAndWaitForTokenAsync()
+    {
         var node = string.IsNullOrWhiteSpace(_config.NodeExe)
             ? Environment.GetEnvironmentVariable("DSH_NODE") ?? @"C:\Program Files\nodejs\node.exe"
             : _config.NodeExe;
@@ -120,9 +148,7 @@ sealed class MainForm : Form
         void onLine(string? line)
         {
             if (string.IsNullOrEmpty(line)) return;
-            var match = System.Text.RegularExpressions.Regex.Match(
-                line,
-                @"dsh web:\s+(http://127\.0\.0\.1:\d+/\S*)");
+            var match = ReadyUrl.Match(line);
             if (match.Success)
             {
                 ready.TrySetResult(match.Groups[1].Value.Trim());
@@ -141,7 +167,9 @@ sealed class MainForm : Form
         cts.Token.Register(() => ready.TrySetCanceled(cts.Token));
         try
         {
-            return await ready.Task.WaitAsync(cts.Token);
+            var url = await ready.Task.WaitAsync(cts.Token);
+            new LaunchState { Pid = process.Id, AuthenticatedUrl = url }.Save();
+            return url;
         }
         catch (OperationCanceledException)
         {
