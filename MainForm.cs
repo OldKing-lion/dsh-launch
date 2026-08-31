@@ -9,8 +9,9 @@ namespace DshRepoShell;
 
 /// <summary>
 /// Thin desktop window around the git-checkout <c>pnpm dsh web</c> page.
-/// Closing the window hides to the tray; 退出 (and process teardown) stops
-/// this shell and the dsh web process tree so port 3080 is released.
+/// Closing the window hides to the tray. 退出 stops this shell and the
+/// dsh web process tree so port 3080 is released. 重启 does the same, then
+/// starts a new shell instance once this process has exited.
 /// </summary>
 sealed class MainForm : Form
 {
@@ -60,6 +61,8 @@ sealed class MainForm : Form
 
         var menu = new ContextMenuStrip();
         menu.Items.Add("显示窗口", null, (_, _) => ShowFromTray());
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add("重启", null, (_, _) => Restart());
         menu.Items.Add("退出", null, (_, _) => Quit());
         _tray = new NotifyIcon
         {
@@ -310,7 +313,7 @@ sealed class MainForm : Form
         if (_reallyExit || e.CloseReason != CloseReason.UserClosing) return;
         e.Cancel = true;
         Hide();
-        _tray.ShowBalloonTip(1500, "DeepSeek Harness", "已收起到托盘。右键图标可退出。", ToolTipIcon.Info);
+        _tray.ShowBalloonTip(1500, "DeepSeek Harness", "已收起到托盘。右键图标可重启或退出。", ToolTipIcon.Info);
     }
 
     void ShowFromTray()
@@ -318,6 +321,66 @@ sealed class MainForm : Form
         Show();
         WindowState = FormWindowState.Normal;
         Activate();
+    }
+
+    void Restart()
+    {
+        try
+        {
+            ScheduleRelaunch();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                this,
+                ex.Message,
+                "重启失败",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+            return;
+        }
+        Quit();
+    }
+
+    /// <summary>
+    /// Detached waiter: after this PID exits (WebView2 user data and port 3080
+    /// released), start a new shell. Must not be assigned to <see cref="ChildJob"/>.
+    /// </summary>
+    static void ScheduleRelaunch()
+    {
+        var exe = Environment.ProcessPath;
+        if (string.IsNullOrEmpty(exe)) exe = Application.ExecutablePath;
+        if (string.IsNullOrEmpty(exe) || !File.Exists(exe))
+        {
+            throw new InvalidOperationException("找不到当前程序路径，无法重启。");
+        }
+
+        var powershell = Path.Combine(
+            Environment.SystemDirectory,
+            "WindowsPowerShell",
+            "v1.0",
+            "powershell.exe");
+        var psi = new ProcessStartInfo
+        {
+            FileName = File.Exists(powershell) ? powershell : "powershell.exe",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WindowStyle = ProcessWindowStyle.Hidden,
+        };
+        psi.ArgumentList.Add("-NoProfile");
+        psi.ArgumentList.Add("-WindowStyle");
+        psi.ArgumentList.Add("Hidden");
+        psi.ArgumentList.Add("-Command");
+        psi.ArgumentList.Add(
+            "Wait-Process -Id $env:DSH_RELAUNCH_PID -Timeout 30 -ErrorAction SilentlyContinue; " +
+            "if (-not (Get-Process -Id $env:DSH_RELAUNCH_PID -ErrorAction SilentlyContinue)) { " +
+            "Start-Process -FilePath $env:DSH_RELAUNCH_EXE }");
+        psi.Environment["DSH_RELAUNCH_PID"] = Environment.ProcessId.ToString();
+        psi.Environment["DSH_RELAUNCH_EXE"] = exe;
+        if (Process.Start(psi) is null)
+        {
+            throw new InvalidOperationException("无法启动重启等待进程。");
+        }
     }
 
     void Quit()

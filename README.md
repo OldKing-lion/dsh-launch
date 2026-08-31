@@ -2,7 +2,7 @@
 
 Windows 桌面壳：用 WebView2 打开本机 deepseek-harness 仓库的 `pnpm dsh web` 页面。
 
-- 关窗口收起到托盘；托盘右键「退出」会结束本窗口和它拉起的 `dsh web` 进程树（释放端口）
+- 关窗口收起到托盘；托盘右键「退出」会结束本窗口和它拉起的 `dsh web` 进程树（释放端口）；「重启」等价于退出后再打开一套新的壳 + `dsh web`
 - 不依赖 npm 全局 `@deepseek-ai/dsh`
 - 图标为黑鲸（来自社区 splash-launcher 资源）
 
@@ -37,6 +37,6 @@ dotnet publish DshRepoShell.csproj -c Release -r win-x64 --self-contained false 
 
 dsh web 要求带 process token 的地址。本程序会自己拉起 `pnpm dsh web --no-open` 并打开打印出来的 `?token=` URL。
 
-托盘「退出」或结束本进程时，会把这次拉起的 node/`dsh web` 整棵进程树一起杀掉，避免 3080 被残留占用。关窗口（右上角 X）仍然只是收起到托盘，不杀 dsh。
+托盘「退出」或结束本进程时，会把这次拉起的 node/`dsh web` 整棵进程树一起杀掉，避免 3080 被残留占用。「重启」先做同样的清理，等本进程退出（WebView2 用户目录也释放）后再拉起新的 `DshRepoShell.exe`。关窗口（右上角 X）仍然只是收起到托盘，不杀 dsh。
 
 若 3080 已被终端里的 `pnpm dsh web` 占用，会提示你先关掉那个进程再重试——直接打开 `/` 会出 `authentication required`。
