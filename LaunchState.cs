@@ -32,6 +32,18 @@ sealed class LaunchState
         File.WriteAllText(PathName, JsonSerializer.Serialize(this));
     }
 
+    public static void Clear()
+    {
+        try
+        {
+            if (File.Exists(PathName)) File.Delete(PathName);
+        }
+        catch
+        {
+            // Stale state is only a reuse hint; failing to delete must not block exit.
+        }
+    }
+
     public bool MatchesLiveProcess()
     {
         if (Pid <= 0 || string.IsNullOrWhiteSpace(AuthenticatedUrl)) return false;
@@ -43,6 +55,19 @@ sealed class LaunchState
         catch
         {
             return false;
+        }
+    }
+
+    public Process? TryGetLiveProcess()
+    {
+        if (!MatchesLiveProcess()) return null;
+        try
+        {
+            return Process.GetProcessById(Pid);
+        }
+        catch
+        {
+            return null;
         }
     }
 }

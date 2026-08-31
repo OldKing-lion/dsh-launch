@@ -9,8 +9,8 @@ namespace DshRepoShell;
 
 /// <summary>
 /// Thin desktop window around the git-checkout <c>pnpm dsh web</c> page.
-/// Closing the window hides to the tray; only 退出 stops this shell.
-/// The dsh process is left running so a Job object cannot take it down with us.
+/// Closing the window hides to the tray; 退出 (and process teardown) stops
+/// this shell and the dsh web process tree so port 3080 is released.
 /// </summary>
 sealed class MainForm : Form
 {
@@ -38,6 +38,8 @@ sealed class MainForm : Form
     };
     readonly NotifyIcon _tray;
     readonly Icon _icon;
+    readonly ChildJob _dshJob = new();
+    Process? _dshProcess;
     bool _reallyExit;
 
     public MainForm()
@@ -129,6 +131,7 @@ sealed class MainForm : Form
             if (saved?.MatchesLiveProcess() == true
                 && saved.AuthenticatedUrl.Contains("token=", StringComparison.Ordinal))
             {
+                AttachDsh(saved.TryGetLiveProcess());
                 return saved.AuthenticatedUrl;
             }
 
@@ -225,6 +228,7 @@ sealed class MainForm : Form
         {
             throw new InvalidOperationException("无法启动 pnpm dsh web（node 进程没起来）");
         }
+        AttachDsh(process);
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
 
@@ -239,12 +243,45 @@ sealed class MainForm : Form
         }
         catch (OperationCanceledException)
         {
+            StopDsh();
             string dump;
             lock (log) dump = Tail(log.ToString(), 40);
             File.WriteAllText(LogPath, dump);
             throw new TimeoutException(
                 "90 秒内没有等到 dsh web 的 token URL。\n" + dump);
         }
+    }
+
+    void AttachDsh(Process? process)
+    {
+        if (process is null || process.HasExited) return;
+        if (!ReferenceEquals(_dshProcess, process))
+        {
+            _dshProcess?.Dispose();
+            _dshProcess = process;
+        }
+        _dshJob.TryAssign(process);
+    }
+
+    void StopDsh()
+    {
+        var process = _dshProcess ?? LaunchState.Load()?.TryGetLiveProcess();
+        _dshProcess = null;
+        try
+        {
+            if (process is { HasExited: false })
+            {
+                process.Kill(entireProcessTree: true);
+                process.WaitForExit(5000);
+            }
+        }
+        catch
+        {
+            // Already gone, or access denied; job close on dispose still reaps assigned children.
+        }
+        try { process?.Dispose(); }
+        catch { /* ignore */ }
+        LaunchState.Clear();
     }
 
     static string Tail(string text, int lines)
@@ -286,6 +323,8 @@ sealed class MainForm : Form
     void Quit()
     {
         _reallyExit = true;
+        StopDsh();
+        _dshJob.Dispose();
         _tray.Visible = false;
         Close();
     }
@@ -294,6 +333,8 @@ sealed class MainForm : Form
     {
         if (disposing)
         {
+            StopDsh();
+            _dshJob.Dispose();
             _tray.Dispose();
             _icon.Dispose();
             _web.Dispose();
